@@ -27,7 +27,12 @@ elif os.path.exists("/.dockerenv"):
 else:
     DB_PATH = "prices_history.db"
 
-PROMOTECH_BASE_URL = "https://promotech.app.br"
+PROMOTECH_BASE_URL = os.getenv("PROMOTECH_BASE_URL", "https://promotech.app.br")
+SEARXNG_URL_DOCKER = os.getenv("SEARXNG_URL", "http://searxng:8080/search")
+SEARXNG_URL_LOCAL = os.getenv("SEARXNG_URL_LOCAL", "http://localhost:9092/search")
+OLLAMA_BASE_URL_DOCKER = os.getenv("OLLAMA_BASE_URL_DOCKER", "http://host.docker.internal:11434")
+OLLAMA_BASE_URL_LOCAL = os.getenv("OLLAMA_BASE_URL_LOCAL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "ollama/qwen2.5-coder:7b")
 PROMOTECH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -670,11 +675,11 @@ async def buscar_dados_legado(req: RequisicaoBusca):
     # Detecta onde o código está rodando para acessar o SearXNG corretamente
     if os.path.exists('/.dockerenv'):
         # No Docker, usa a rede interna (nome do container e porta original)
-        searxng_url = os.getenv("SEARXNG_URL", "http://searxng:8080/search")
+        searxng_url = SEARXNG_URL_DOCKER
         print(f" SearXNG: Rodando no Docker! URL: {searxng_url}")
     else:
         # Local no VS Code, usa o localhost e a porta exposta (9092)
-        searxng_url = "http://localhost:9092/search"
+        searxng_url = SEARXNG_URL_LOCAL
         print(f" SearXNG: Rodando Local! URL: {searxng_url}")
     
     async with httpx.AsyncClient() as client:
@@ -716,14 +721,14 @@ async def buscar_dados_legado(req: RequisicaoBusca):
 
     # Detecta automaticamente se o código está dentro do Docker ou rodando local (VS Code)
     if os.path.exists('/.dockerenv'):
-        url_ollama = "http://host.docker.internal:11434"
+        url_ollama = OLLAMA_BASE_URL_DOCKER
         print("🐳 Rodando no Docker! Conectando ao Ollama via host.docker.internal...")
     else:
-        url_ollama = "http://localhost:11434"
+        url_ollama = OLLAMA_BASE_URL_LOCAL
         print("💻 Rodando Local! Conectando ao Ollama via localhost...")
     
     llm_config = LLMConfig(
-        provider="ollama/qwen2.5-coder:7b", 
+        provider=OLLAMA_MODEL,
         base_url=url_ollama 
     )
     
