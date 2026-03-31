@@ -1,11 +1,12 @@
 import requests
 import base64
 import time
+import os
 
 # Configurações do seu ambiente Docker em São Luís
-URL_BASE = "http://localhost:9095" 
-API_KEY = "EmanuelSenhaSecreta123"
-NOVA_INSTANCE = "bot-emanuel-v2"
+URL_BASE = os.getenv("EVOLUTION_URL", "http://localhost:9095")
+API_KEY = os.getenv("EVOLUTION_API_TOKEN", "")
+NOVA_INSTANCE = os.getenv("INSTANCE_NAME", "bot-emanuel-v2")
 
 def gerenciar_instancia():
     headers = {

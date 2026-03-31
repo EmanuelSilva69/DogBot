@@ -7,9 +7,9 @@ services:
     container_name: postgres-emanuel
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=emanuel_admin
-      - POSTGRES_PASSWORD=UfmaEngenharia2026
-      - POSTGRES_DB=automacao_db
+      - POSTGRES_USER=${POSTGRES_USER:-emanuel_admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-automacao_db}
     ports:
       - "5432:5432"
     volumes:
@@ -98,9 +98,9 @@ services:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=automacao_db
-      - DB_POSTGRESDB_USER=emanuel_admin
-      - DB_POSTGRESDB_PASSWORD=UfmaEngenharia2026
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-automacao_db}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-emanuel_admin}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - n8n_data:/home/node/.n8n
     networks:
@@ -163,13 +163,13 @@ services:
     environment:
       - SERVER_URL=http://evolution-api:8080
       - AUTHENTICATION_TYPE=apikey
-      - AUTHENTICATION_API_KEY=EmanuelSenhaSecreta123
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
       
       # --- AJUSTES PARA A V2 E CONEXÃO COM O BANCO ---
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
       # A URL agora aponta para evolution_db em vez de automacao_db
-      - DATABASE_CONNECTION_URI=postgresql://emanuel_admin:UfmaEngenharia2026@postgres:5432/evolution_db?schema=public
+      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER:-emanuel_admin}:${POSTGRES_PASSWORD}@postgres:5432/${EVOLUTION_DB_NAME:-evolution_db}?schema=public
       - DATABASE_CONNECTION_CLIENT_NAME=evolution_v2
       - CACHE_REDIS_ENABLED=true
       - CACHE_REDIS_URI=redis://redis:6379/0
@@ -207,7 +207,9 @@ services:
     environment:
       - EVOLUTION_URL=http://evolution-api:8080
       - SCRAPER_URL=http://scrapper-python:8000/buscar
-      - INSTANCE_NAME=bot-emanuel-v2 # Importante para o script Lifespan!
+      - INSTANCE_NAME=${INSTANCE_NAME:-bot-emanuel-v2} # Importante para o script Lifespan!
+      - EVOLUTION_API_TOKEN=${EVOLUTION_API_KEY}
+      - GEMINI_KEY=${GEMINI_KEY:-}
       
     extra_hosts:
       - "host.docker.internal:host-gateway"

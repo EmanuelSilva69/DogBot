@@ -10,14 +10,14 @@ import os # Adicione o import no topo
 # Configuração de Logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-GEMINI_KEY = "AIzaSyAgGURBh9l293uV7B6JVmbMD3RUSSt6OMI"
+GEMINI_KEY = os.getenv("GEMINI_KEY", "")
 # --- CONFIGURAÇÕES ---
 # URLs Híbridas: Prioriza o ambiente Docker, mas aceita localhost como fallback
 EVOLUTION_BASE_URL = os.getenv("EVOLUTION_URL", "http://localhost:9095")
 # Nota: Externamente seu scraper está na 9094, internamente na 8000
 SCRAPER_URL = os.getenv("SCRAPER_URL", "http://localhost:8000/buscar")
-EVOLUTION_API_TOKEN = "EmanuelSenhaSecreta123"
-INSTANCE_NAME = "bot-emanuel-v2"
+EVOLUTION_API_TOKEN = os.getenv("EVOLUTION_API_TOKEN", "")
+INSTANCE_NAME = os.getenv("INSTANCE_NAME", "bot-emanuel-v2")
 # --- O NOVO GERENCIADOR DE VIDA (LIFESPAN) ---
 import asyncio # Precisamos de asyncio para a tarefa de fundo
 
