@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+httpx
+requests
+requests-toolbelt
+beautifulsoup4
+playwright
+crawl4ai
+python-socketio[client]
+websocket-client

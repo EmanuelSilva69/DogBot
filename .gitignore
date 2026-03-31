@@ -1,0 +1,87 @@
+# =========================
+# Secrets and credentials
+# =========================
+.env
+.env.*
+*.env
+*.secret
+*.secrets
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+*.kdbx
+*.ovpn
+
+# Cloud/API credential files
+*credentials*.json
+*service-account*.json
+*secret*.json
+*apikey*.json
+*api_key*.json
+
+# =========================
+# Databases and local data
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Keep data directory structure but ignore content
+/data/*
+!/data/.gitkeep
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.conda/
+
+# =========================
+# Logs and runtime artifacts
+# =========================
+*.log
+logs/
+*.pid
+*.out
+
+# =========================
+# IDE and OS
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =========================
+# Project-specific sensitive/local files
+# =========================
+qrcode_v2.png
+Bot Emanuel - Inteligência de Identidade v3.json

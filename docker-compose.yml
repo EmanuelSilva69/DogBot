@@ -1,0 +1,233 @@
+
+
+services:
+  # 0. PostgreSQL (A Memória do Sistema) - NOVO
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-emanuel
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=emanuel_admin
+      - POSTGRES_PASSWORD=UfmaEngenharia2026
+      - POSTGRES_DB=automacao_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ai-network-scrapper
+  #Redis (Cache de Performance) - NOVO
+  redis:
+    image: redis:7-alpine
+    container_name: redis-emanuel
+    restart: unless-stopped
+    networks:
+      - ai-network-scrapper
+
+  # 1. Open WebUI
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui-emanuel-v2
+    restart: unless-stopped
+    ports:
+      - "9091:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - 'OLLAMA_BASE_URL=http://ollama:11434'
+      - 'ENABLE_RAG_WEB_SEARCH=True'
+      - 'RAG_WEB_SEARCH_ENGINE=searxng'
+      - 'SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>'
+    volumes:
+      - open-webui-storage:/app/backend/data
+    networks:
+      - ai-network-scrapper
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  # Ollama local na mesma rede Docker
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama-emanuel
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list > /dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # 2. SearXNG
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng-emanuel-v2
+    restart: unless-stopped
+    ports:
+      - "9092:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - BASE_URL=http://searxng:8080/
+    networks:
+      - ai-network-scrapper
+
+  # 3. n8n (Agora configurado para usar o Postgres)
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-emanuel-v2
+    restart: unless-stopped
+    ports:
+      - "9093:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://n8n-emanuel-v2:5678/
+      - GENERIC_TIMEZONE=America/Sao_Paulo 
+      - N8N_BLOCK_TIMEOUT=900
+      - N8N_COMMUNITY_PACKAGES_ENABLED=true
+      # AJUSTE: n8n usando Postgres como banco interno para mais performance
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=automacao_db
+      - DB_POSTGRESDB_USER=emanuel_admin
+      - DB_POSTGRESDB_PASSWORD=UfmaEngenharia2026
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:5678/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_started
+
+  # 4. Scraper Python
+  scrapper-python:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scrapper-emanuel
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    command: uvicorn scrapper:app --host 0.0.0.0 --port 8000
+    environment:
+      - SEARXNG_URL=http://searxng:8080/search
+      - PRICE_DB_PATH=/app/data/prices_history.db
+      - OLLAMA_BASE_URL=http://ollama:11434
+      
+    ports:
+      - "9094:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+    working_dir: /app
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    depends_on:
+      searxng:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+
+ 
+# 5. Evolution API (Agora na Versão 2.x)
+  # 5. Evolution API (v2.3.7 - Configuração de Banco)
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.7
+    container_name: evolution-emanuel
+    restart: unless-stopped
+    ports:
+      - "9095:8080"
+    environment:
+      - SERVER_URL=http://evolution-api:8080
+      - AUTHENTICATION_TYPE=apikey
+      - AUTHENTICATION_API_KEY=EmanuelSenhaSecreta123
+      
+      # --- AJUSTES PARA A V2 E CONEXÃO COM O BANCO ---
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      # A URL agora aponta para evolution_db em vez de automacao_db
+      - DATABASE_CONNECTION_URI=postgresql://emanuel_admin:UfmaEngenharia2026@postgres:5432/evolution_db?schema=public
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution_v2
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/0
+      - CACHE_LOCAL_ENABLED=false
+      
+      # --- OUTRAS CONFIGURAÇÕES ---
+      - CONFIG_SESSION_PHONE_WATCH=true
+      - QRCODE_LIMIT=30
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8080', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_started
+      redis:
+        condition: service_started
+      
+
+  # 6. Bot Principal
+  bot-whatsapp:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: bot-emanuel-final
+    ports:               # <-- ADICIONE ISSO
+      - "8001:8001"
+    restart: unless-stopped
+    environment:
+      - EVOLUTION_URL=http://evolution-api:8080
+      - SCRAPER_URL=http://scrapper-python:8000/buscar
+      - INSTANCE_NAME=bot-emanuel-v2 # Importante para o script Lifespan!
+      
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      scrapper-python:
+        condition: service_healthy
+      evolution-api:
+        condition: service_healthy
+      postgres: # Adicionado
+        condition: service_started
+    networks:
+      - ai-network-scrapper
+
+networks:
+  ai-network-scrapper:
+    driver: bridge
+
+volumes:
+  open-webui-storage:
+  n8n_data:
+  evolution_instances:
+  postgres_data: # AJUSTE: Não esqueça de declarar este volume aqui!
+  ollama_data:
