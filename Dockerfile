@@ -15,6 +15,8 @@ RUN playwright install chromium
 
 COPY scrapper.py /app/scrapper.py
 COPY scrapper_geral.py /app/scrapper_geral.py
+COPY scrapper_pokemon.py /app/scrapper_pokemon.py
+COPY cupons.py /app/cupons.py
 COPY qrcode.py /app/qrcode.py
 
 RUN mkdir -p /app/data && chown -R pwuser:pwuser /app

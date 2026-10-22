@@ -1,11 +1,27 @@
+# Web framework
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
+
+# HTTP client
 httpx
 requests
 requests-toolbelt
+
+# LangChain / LangGraph
+langchain-core
+langgraph
+langgraph-checkpoint-postgres
+langchain-ollama
+
+# Web scraping (existing services)
 beautifulsoup4
 playwright
 crawl4ai
+
+# Async DB
+asyncpg
+
+# WebSocket (Evolution API)
 python-socketio[client]
 websocket-client

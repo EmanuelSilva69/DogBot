@@ -1,7 +1,7 @@
-
-
 services:
-  # 0. PostgreSQL (A Memória do Sistema) - NOVO
+  # ─────────────────────────────────────────────
+  # BANCO & CACHE
+  # ─────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: postgres-emanuel
@@ -14,17 +14,30 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-emanuel_admin} -d ${POSTGRES_DB:-automacao_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     networks:
       - ai-network-scrapper
-  #Redis (Cache de Performance) - NOVO
+
   redis:
     image: redis:7-alpine
     container_name: redis-emanuel
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - ai-network-scrapper
 
-  # 1. Open WebUI
+  # ─────────────────────────────────────────────
+  # OPEN WEBUI
+  # ─────────────────────────────────────────────
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui-emanuel-v2
@@ -34,37 +47,18 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - 'OLLAMA_BASE_URL=http://ollama:11434'
-      - 'ENABLE_RAG_WEB_SEARCH=True'
-      - 'RAG_WEB_SEARCH_ENGINE=searxng'
-      - 'SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>'
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
     volumes:
       - open-webui-storage:/app/backend/data
     networks:
       - ai-network-scrapper
-    depends_on:
-      ollama:
-        condition: service_healthy
 
-  # Ollama local na mesma rede Docker
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama-emanuel
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - ai-network-scrapper
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list > /dev/null 2>&1 || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-
-  # 2. SearXNG
+  # ─────────────────────────────────────────────
+  # SEARXNG (Motor de Busca)
+  # ─────────────────────────────────────────────
   searxng:
     image: docker.io/searxng/searxng:latest
     container_name: searxng-emanuel-v2
@@ -75,10 +69,18 @@ services:
       - ./searxng:/etc/searxng:rw
     environment:
       - BASE_URL=http://searxng:8080/
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/search', timeout=5)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
     networks:
       - ai-network-scrapper
 
-  # 3. n8n (Agora configurado para usar o Postgres)
+  # ─────────────────────────────────────────────
+  # N8N (Workflow Engine)
+  # ─────────────────────────────────────────────
   n8n:
     image: n8nio/n8n:latest
     container_name: n8n-emanuel-v2
@@ -91,10 +93,9 @@ services:
       - N8N_PROTOCOL=http
       - NODE_ENV=production
       - WEBHOOK_URL=http://n8n-emanuel-v2:5678/
-      - GENERIC_TIMEZONE=America/Sao_Paulo 
+      - GENERIC_TIMEZONE=America/Sao_Paulo
       - N8N_BLOCK_TIMEOUT=900
       - N8N_COMMUNITY_PACKAGES_ENABLED=true
-      # AJUSTE: n8n usando Postgres como banco interno para mais performance
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
@@ -113,9 +114,11 @@ services:
       start_period: 40s
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
 
-  # 4. Scraper Python
+  # ─────────────────────────────────────────────
+  # SCRAPPER TECH (SearXNG + Promotech)
+  # ─────────────────────────────────────────────
   scrapper-python:
     build:
       context: .
@@ -123,19 +126,24 @@ services:
     container_name: scrapper-emanuel
     restart: unless-stopped
     init: true
-    shm_size: "1gb"
+    shm_size: "2gb"
     command: uvicorn scrapper:app --host 0.0.0.0 --port 8000
     environment:
       - SEARXNG_URL=http://searxng:8080/search
       - PRICE_DB_PATH=/app/data/prices_history.db
-      - OLLAMA_BASE_URL=http://ollama:11434
-      
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - PROMOTECH_MAX_RESULTS=${PROMOTECH_MAX_RESULTS:-20}
+      - TECH_MAX_RESULTS=${TECH_MAX_RESULTS:-80}
+      - TECH_PROCESS_URLS=${TECH_PROCESS_URLS:-0}
+      - TECH_MIN_ITEMS=${TECH_MIN_ITEMS:-5}
     ports:
       - "9094:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+      - ./scrapper.py:/app/scrapper.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
     working_dir: /app
     networks:
       - ai-network-scrapper
@@ -148,12 +156,111 @@ services:
     depends_on:
       searxng:
         condition: service_started
-      ollama:
-        condition: service_healthy
 
- 
-# 5. Evolution API (Agora na Versão 2.x)
-  # 5. Evolution API (v2.3.7 - Configuração de Banco)
+  # ─────────────────────────────────────────────
+  # SCRAPPER GERAL (Mercado Livre / Amazon via Playwright)
+  # ─────────────────────────────────────────────
+  scrapper-geral:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scrapper-geral-emanuel
+    restart: unless-stopped
+    init: true
+    shm_size: "2gb"
+    command: uvicorn scrapper_geral:app --host 0.0.0.0 --port 8001
+    environment:
+      - PRICE_DB_PATH=/app/data/prices_history.db
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - DEFAULT_CEP=${DEFAULT_CEP:-01001000}
+      - GERAL_MAX_RESULTS=${GERAL_MAX_RESULTS:-12}
+    ports:
+      - "9096:8001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./scrapper_geral.py:/app/scrapper_geral.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    working_dir: /app
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ─────────────────────────────────────────────
+  # CUPONS (Teste de Cupons via Playwright)
+  # ─────────────────────────────────────────────
+  cupons:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cupons-emanuel
+    restart: unless-stopped
+    init: true
+    shm_size: "2gb"
+    command: uvicorn cupons:app --host 0.0.0.0 --port 8002
+    environment:
+      - PRICE_DB_PATH=/app/data/prices_history.db
+    ports:
+      - "9098:8002"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./cupons.py:/app/cupons.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    working_dir: /app
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ─────────────────────────────────────────────
+  # SCRAPPER POKEMON (MYP Cards — cartas Pokémon)
+  # ─────────────────────────────────────────────
+  scrapper-pokemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scrapper-pokemon-emanuel
+    restart: unless-stopped
+    init: true
+    command: uvicorn scrapper_pokemon:app --host 0.0.0.0 --port 8003
+    environment:
+      - PRICE_DB_PATH=/app/data/prices_history.db
+      - MYP_BASE_URL=${MYP_BASE_URL:-https://mypcards.com}
+      - DESCONTO_MIN_PCT=${DESCONTO_MIN_PCT:-15}
+      - DESCONTO_TCG_PCT=${DESCONTO_TCG_PCT:-20}
+      - WATCH_MAX_POR_CICLO=${WATCH_MAX_POR_CICLO:-40}
+      - WATCH_DELAY_REQ=${WATCH_DELAY_REQ:-0.4}
+    ports:
+      - "9097:8003"
+    volumes:
+      - ./data:/app/data
+      - ./scrapper_pokemon.py:/app/scrapper_pokemon.py:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    working_dir: /app
+    networks:
+      - ai-network-scrapper
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # ─────────────────────────────────────────────
+  # EVOLUTION API (WhatsApp Gateway v2.3.7)
+  # ─────────────────────────────────────────────
   evolution-api:
     image: evoapicloud/evolution-api:v2.3.7
     container_name: evolution-emanuel
@@ -164,18 +271,13 @@ services:
       - SERVER_URL=http://evolution-api:8080
       - AUTHENTICATION_TYPE=apikey
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
-      
-      # --- AJUSTES PARA A V2 E CONEXÃO COM O BANCO ---
       - DATABASE_ENABLED=true
       - DATABASE_PROVIDER=postgresql
-      # A URL agora aponta para evolution_db em vez de automacao_db
       - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER:-emanuel_admin}:${POSTGRES_PASSWORD}@postgres:5432/${EVOLUTION_DB_NAME:-evolution_db}?schema=public
       - DATABASE_CONNECTION_CLIENT_NAME=evolution_v2
       - CACHE_REDIS_ENABLED=true
       - CACHE_REDIS_URI=redis://redis:6379/0
       - CACHE_LOCAL_ENABLED=false
-      
-      # --- OUTRAS CONFIGURAÇÕES ---
       - CONFIG_SESSION_PHONE_WATCH=true
       - QRCODE_LIMIT=30
     volumes:
@@ -190,38 +292,72 @@ services:
       start_period: 40s
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_started
-      
 
-  # 6. Bot Principal
+  # ─────────────────────────────────────────────
+  # BOT PRINCIPAL — LangGraph Agent (Qwen 14B)
+  # ─────────────────────────────────────────────
   bot-whatsapp:
     build:
       context: .
       dockerfile: Dockerfile.bot
-    container_name: bot-emanuel-final
-    ports:               # <-- ADICIONE ISSO
+    container_name: bot-emanuel-langgraph
+    ports:
       - "8001:8001"
     restart: unless-stopped
+    shm_size: "1gb"
     environment:
       - EVOLUTION_URL=http://evolution-api:8080
-      - SCRAPER_URL=http://scrapper-python:8000/buscar
-      - INSTANCE_NAME=${INSTANCE_NAME:-bot-emanuel-v2} # Importante para o script Lifespan!
-      - EVOLUTION_API_TOKEN=${EVOLUTION_API_KEY}
-      - GEMINI_KEY=${GEMINI_KEY:-}
-      
+      - SCRAPPER_TECH_URL=http://scrapper-python:8000/buscar
+      - SCRAPPER_GERAL_URL=http://scrapper-geral:8001/buscar_geral
+      - CUPONS_URL=http://cupons:8002/testar_cupons
+      - SCRAPPER_POKEMON_BUSCAR_URL=http://scrapper-pokemon:8003/buscar_pokemon
+      - SCRAPPER_POKEMON_DETALHAR_URL=http://scrapper-pokemon:8003/detalhar_pokemon
+      - SCRAPPER_POKEMON_HISTORICO_URL=http://scrapper-pokemon:8003/historico_pokemon
+      - SCRAPPER_POKEMON_WATCHLIST_ADD_URL=http://scrapper-pokemon:8003/watchlist/add
+      - SCRAPPER_POKEMON_WATCHLIST_REMOVE_URL=http://scrapper-pokemon:8003/watchlist/remove
+      - SCRAPPER_POKEMON_WATCHLIST_LIST_URL=http://scrapper-pokemon:8003/watchlist/list
+      - SCRAPPER_POKEMON_VERIFICAR_URL=http://scrapper-pokemon:8003/verificar_descontos
+      - DESCONTO_INTERVALO_MIN=${DESCONTO_INTERVALO_MIN:-20}
+      - DESCONTO_ATIVO=${DESCONTO_ATIVO:-1}
+      - POKEAPI_BASE_URL=${POKEAPI_BASE_URL:-https://pokeapi.co/api/v2}
+      - INSTANCE_NAME=${INSTANCE_NAME:-bot-emanuel-v2}
+      - EVOLUTION_API_KEY=${EVOLUTION_API_KEY}
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+      - OLLAMA_NUM_GPU=99
+      - POSTGRES_USER=${POSTGRES_USER:-emanuel_admin}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-automacao_db}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - SCRAPPER_TIMEOUT=350
+      - CUPONS_TIMEOUT=70
+      - SCRAPPER_POKEMON_TIMEOUT=120
+      - OLLAMA_RETRIES=10
+      - OLLAMA_RETRY_DELAY=2.0
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - ./bot:/app/bot:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    networks:
+      - ai-network-scrapper
     depends_on:
+      postgres:
+        condition: service_healthy
       scrapper-python:
+        condition: service_healthy
+      scrapper-geral:
+        condition: service_healthy
+      cupons:
+        condition: service_healthy
+      scrapper-pokemon:
         condition: service_healthy
       evolution-api:
         condition: service_healthy
-      postgres: # Adicionado
-        condition: service_started
-    networks:
-      - ai-network-scrapper
 
 networks:
   ai-network-scrapper:
@@ -231,5 +367,4 @@ volumes:
   open-webui-storage:
   n8n_data:
   evolution_instances:
-  postgres_data: # AJUSTE: Não esqueça de declarar este volume aqui!
-  ollama_data:
+  postgres_data:

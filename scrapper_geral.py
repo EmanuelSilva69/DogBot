@@ -1,12 +1,29 @@
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import quote_plus
 
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+import requests
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+
+app = FastAPI(title="Scrapper Geral", version="1.0.0")
+DEFAULT_CEP = os.getenv("DEFAULT_CEP", "01001000")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://searxng:8080/search")
+MAX_GERAL_RESULTS = int(os.getenv("GERAL_MAX_RESULTS", "5"))
+MAX_REASONABLE_PRICE = float(os.getenv("MAX_REASONABLE_PRICE", "200000"))
+MIN_REASONABLE_PRICE = float(os.getenv("MIN_REASONABLE_PRICE", "10"))
+
+
+class BuscaGeralRequest(BaseModel):
+    termo: str = Field(..., min_length=2, description="Termo da busca")
+    cep: Optional[str] = Field(default=None, description="CEP para simular frete")
 
 
 @dataclass
@@ -19,12 +36,56 @@ class Oferta:
     link: str
 
 
+def formatar_preco_brl(valor: float) -> str:
+    inteiro, decimal = f"{valor:.2f}".split(".")
+    inteiro = inteiro[::-1]
+    inteiro = ".".join(inteiro[i : i + 3] for i in range(0, len(inteiro), 3))[::-1]
+    return f"R$ {inteiro},{decimal}"
+
+
+def oferta_para_item(oferta: Oferta):
+    return {
+        "nome": oferta.produto,
+        "preco": formatar_preco_brl(oferta.preco_total),
+        "loja": oferta.loja,
+        "confiavel": True,
+        "preco_atual": oferta.preco_total,
+        "menor_30d": None,
+        "menor_90d": None,
+        "avaliacao": "Promocao Boa" if oferta.valor_frete == 0 else "Preco Normal",
+        "link": oferta.link,
+        "frete": oferta.valor_frete,
+        "preco_total": oferta.preco_total,
+    }
+
+
+def ofertas_para_payload(ofertas: List[Oferta], limite: int):
+    selecionadas = ofertas[: max(1, limite)]
+    itens = [oferta_para_item(o) for o in selecionadas]
+
+    resultados = [
+        {
+            "url": item["link"],
+            "itens": [item],
+        }
+        for item in itens
+    ]
+
+    return {
+        "melhor_oferta": itens[0],
+        "resultados": resultados,
+    }
+
+
 def normalizar_preco(texto: str) -> Optional[float]:
     """Converte valores monetarios (pt-BR/en-US) para float."""
     if not texto:
         return None
 
-    match = re.search(r"\d[\d\.,]*", texto)
+    # Prefere token com centavos, evitando capturar ids/rankings acidentalmente.
+    match = re.search(r"(?:R\$\s*)?\d{1,3}(?:\.\d{3})*,\d{2}|(?:R\$\s*)?\d+[\.,]\d{2}", texto)
+    if not match:
+        match = re.search(r"\d[\d\.,]*", texto)
     if not match:
         return None
 
@@ -41,9 +102,146 @@ def normalizar_preco(texto: str) -> Optional[float]:
 
     try:
         valor = float(bruto)
-        return valor if valor >= 0 else None
+        if valor < MIN_REASONABLE_PRICE:
+            return None
+        if valor > MAX_REASONABLE_PRICE:
+            return None
+        return valor
     except ValueError:
         return None
+
+
+def extrair_preco_amazon_card(card) -> Optional[float]:
+    candidatos_texto = []
+
+    # Prioridade 1: span.a-offscreen (texto visivel do preco)
+    offscreen = card.locator("span.a-offscreen")
+    qtd_off = min(offscreen.count(), 4)
+    for i in range(qtd_off):
+        txt = offscreen.nth(i).inner_text().strip()
+        if txt:
+            candidatos_texto.append(txt)
+
+    # Prioridade 2: preco dentro de span.a-price (evita capturar numeros de outros contextos)
+    price_span = card.locator("span.a-price")
+    if price_span.count() > 0:
+        for p_idx in range(min(price_span.count(), 3)):
+            p = price_span.nth(p_idx)
+            whole = p.locator("span.a-price-whole")
+            frac = p.locator("span.a-price-fraction")
+            if whole.count() > 0:
+                p_whole = whole.first.inner_text().strip()
+                p_frac = frac.first.inner_text().strip() if frac.count() > 0 else ""
+                if p_whole:
+                    if p_frac and len(re.sub(r"\D", "", p_frac)) <= 2:
+                        candidatos_texto.append(f"{p_whole},{p_frac}")
+                    else:
+                        candidatos_texto.append(p_whole)
+
+    # Prioridade 3: cores do preco da Amazon (laranja)
+    price_symbol = card.locator("span.a-price-symbol, .a-price .a-text-price")
+    for i in range(min(price_symbol.count(), 2)):
+        txt = price_symbol.nth(i).inner_text().strip()
+        if txt:
+            candidatos_texto.append(txt)
+
+    for txt in candidatos_texto:
+        valor = normalizar_preco(txt)
+        if valor is not None:
+            return valor
+
+    return None
+
+
+def _primeiro_texto(locator) -> str:
+    try:
+        if locator.count() == 0:
+            return ""
+        return locator.first.inner_text().strip()
+    except Exception:
+        return ""
+
+
+def _primeiro_href(locator) -> str:
+    try:
+        if locator.count() == 0:
+            return ""
+        href = locator.first.get_attribute("href") or ""
+        return href.strip()
+    except Exception:
+        return ""
+
+
+def _extrair_preco_multi(texto: str):
+    """Tenta extrair preco de um texto usando multiplos padroes."""
+    if not texto:
+        return None
+    padroes = [
+        r"R\$\s*[\d\.,]+",
+        r"US\$\s*[\d\.,]+",
+        r"\$\s*[\d\.,]+",
+        r"(?:por|apenas|a\ vista|à vista)\s*R\$\s*[\d\.,]+",
+        r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b",
+        r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b",
+    ]
+    for padrao in padroes:
+        match = re.search(padrao, texto, re.IGNORECASE)
+        if match:
+            val = normalizar_preco(match.group(0))
+            if val is not None:
+                return val
+    return None
+
+
+def buscar_urls_searxng(termo: str, limite: int = 6) -> List[dict]:
+    """Usa SearXNG como fallback para descobrir URLs e precos de lojas quando ML/Amazon falham."""
+    candidatos = []
+    vistos_urls = set()
+    params_list = [
+        {"q": termo, "format": "json", "engines": "google,bing,duckduckgo"},
+        {"q": f'"{termo}"', "format": "json", "engines": "google,bing,duckduckgo"},
+        {"q": termo, "format": "json", "engines": "qwant,yahoo,startpage"},
+    ]
+
+    for params in params_list:
+        try:
+            resp = requests.get(SEARXNG_URL, params=params, timeout=20)
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            for resultado in payload.get("results", []):
+                url = (resultado.get("url") or "").strip()
+                if not url or url in vistos_urls:
+                    continue
+                vistos_urls.add(url)
+
+                titulo = (resultado.get("title") or "").strip()
+                resumo = (resultado.get("content") or "").strip()
+                texto_base = f"{titulo} {resumo}".strip()
+                preco = _extrair_preco_multi(texto_base)
+
+                dom = url.lower()
+                if any(x in dom for x in ["mercadolivre.", "amazon.", "kabum.", "pichau.", "terabyte.", "shopee.", "shein.", "magazineluiza.", "extra.", "americanas.", "casasbahia."]):
+                    prioridade = 1
+                else:
+                    prioridade = 2
+
+                candidatos.append({
+                    "url": url,
+                    "titulo": titulo,
+                    "preco": preco,
+                    "prioridade": prioridade,
+                })
+
+                if len(candidatos) >= limite * 3:
+                    break
+            if len(candidatos) >= limite * 2:
+                break
+        except Exception:
+            continue
+
+    candidatos.sort(key=lambda x: (x["prioridade"], x["preco"] if x["preco"] is not None else float("inf")))
+    return candidatos[:limite]
 
 
 def buscar_top3_mercado_livre(page, nome_produto: str):
@@ -67,6 +265,8 @@ def buscar_top3_mercado_livre(page, nome_produto: str):
     cards = page.locator("li.ui-search-layout__item")
     if cards.count() == 0:
         cards = page.locator("div.ui-search-result")
+    if cards.count() == 0:
+        cards = page.locator("article")
 
     resultados = []
     limite = min(cards.count(), 3)
@@ -75,33 +275,31 @@ def buscar_top3_mercado_livre(page, nome_produto: str):
         card = cards.nth(idx)
         try:
             nome = ""
-            for s in ["h3", "h2.ui-search-item__title", "a.poly-component__title"]:
-                loc = card.locator(s)
-                if loc.count() > 0:
-                    nome = loc.first.inner_text().strip()
-                    if nome:
-                        break
+            for s in ["h3", "h2.ui-search-item__title", "a.poly-component__title", "[data-testid='product-title']"]:
+                texto = _primeiro_texto(card.locator(s))
+                if texto:
+                    nome = texto
+                    break
 
             link = ""
-            for s in ["a.ui-search-link", "a.poly-component__title", "a"]:
-                loc = card.locator(s)
-                if loc.count() > 0:
-                    href = loc.first.get_attribute("href")
-                    if href:
-                        link = href
-                        break
+            for s in ["a.ui-search-link", "a.poly-component__title", "a", "[data-testid='product-link']"]:
+                href = _primeiro_href(card.locator(s))
+                if href:
+                    link = href
+                    break
 
             preco_texto = ""
             for s in [
                 "span.andes-money-amount__fraction",
                 "span.price-tag-fraction",
                 "span.ui-search-price__part",
+                "span.andes-money-amount__currency-symbol",
+                "div.andes-money-amount",
             ]:
-                loc = card.locator(s)
-                if loc.count() > 0:
-                    preco_texto = loc.first.inner_text().strip()
-                    if preco_texto:
-                        break
+                texto = _primeiro_texto(card.locator(s))
+                if texto:
+                    preco_texto = texto
+                    break
 
             preco_produto = normalizar_preco(preco_texto)
             if not nome or not link or preco_produto is None:
@@ -115,6 +313,160 @@ def buscar_top3_mercado_livre(page, nome_produto: str):
                     "loja": "Mercado Livre",
                 }
             )
+        except Exception:
+            continue
+
+    return resultados
+
+
+def buscar_top3_shein(page, nome_produto: str):
+    url_busca = f"https://pt.shein.com/search/?q={quote_plus(nome_produto)}"
+    page.goto(url_busca, wait_until="domcontentloaded", timeout=35000)
+    page.wait_for_timeout(3000)
+
+    for seletor in [
+        "button:has-text('Aceitar')",
+        "button:has-text('OK')",
+        "button:has-text('Fechar')",
+        "[class*='close']",
+        "[class*='cookie']",
+    ]:
+        try:
+            if page.locator(seletor).count() > 0:
+                page.locator(seletor).first.click(timeout=1500)
+        except Exception:
+            pass
+
+    page.wait_for_timeout(1000)
+    cards = page.locator("section[id*='product-list'] article, .product-item, [class*='product-card'], [class*='goods-item'], li[class*='product']")
+    if cards.count() == 0:
+        cards = page.locator("[class*='product-list'] [class*='item'], .search-result-list article")
+    if cards.count() == 0:
+        cards = page.locator("a[href*='/products/']").locator("..")
+
+    resultados = []
+    limite = min(cards.count(), 3)
+
+    for idx in range(limite):
+        card = cards.nth(idx)
+        try:
+            nome = ""
+            for s in ["a[class*='title'], a[class*='name'], h3, [class*='product-name'], [class*='goods-title']"]:
+                partes = s.split(", ")
+                for sel in partes:
+                    texto = _primeiro_texto(card.locator(sel))
+                    if texto:
+                        nome = texto.strip()
+                        break
+                if nome:
+                    break
+            if not nome:
+                for s in ["img[alt]", "[alt]"]:
+                    alt = _primeiro_texto(card.locator(s))
+                    if alt:
+                        nome = alt.strip()
+                        break
+
+            link = ""
+            for s in ["a[href*='/products/']", "a[href*='/product-']", "a"]:
+                href = _primeiro_href(card.locator(s))
+                if href and "/products/" in href.lower():
+                    link = href if href.startswith("http") else f"https://pt.shein.com{href}"
+                    break
+            if not link:
+                link = _primeiro_href(card.locator("a"))
+                if link and not link.startswith("http"):
+                    link = f"https://pt.shein.com{link}"
+
+            preco_texto = ""
+            for s in ["[class*='price'] span, [class*='product-price'], span[class*='price'], [class*='c-price'], .price"]:
+                partes = s.split(", ")
+                for sel in partes:
+                    texto = _primeiro_texto(card.locator(sel))
+                    if texto and "R$" in texto:
+                        preco_texto = texto
+                        break
+                if preco_texto:
+                    break
+            if not preco_texto:
+                page_content = card.inner_text()
+                match = re.search(r"R\$\s*[\d\.,]+", page_content)
+                if match:
+                    preco_texto = match.group(0)
+
+            preco_produto = normalizar_preco(preco_texto)
+            if not nome or not link or preco_produto is None:
+                continue
+
+            resultados.append({
+                "produto": nome[:120],
+                "link": link,
+                "preco_produto": preco_produto,
+                "loja": "Shein",
+            })
+        except Exception:
+            continue
+
+    return resultados
+
+
+def buscar_top3_shopee(page, nome_produto: str):
+    url_busca = f"https://shopee.com.br/search?keyword={quote_plus(nome_produto)}"
+    page.goto(url_busca, wait_until="domcontentloaded", timeout=35000)
+    page.wait_for_timeout(3000)
+
+    cards = page.locator("[data-sqe='item'], [data-sqe='name'], div.shopee-search-item-result__item, a[class*='item-link']")
+    if cards.count() == 0:
+        cards = page.locator("[class*='search-item'] [class*='item'], div[class*='card']")
+    if cards.count() == 0:
+        cards = page.locator("a[href*='shopee.com.br/product/']").locator("..")
+
+    resultados = []
+    limite = min(cards.count(), 3)
+
+    for idx in range(limite):
+        card = cards.nth(idx)
+        try:
+            nome = ""
+            for sel in ["div[data-sqe='name']", "[class*='name']", "[class*='title']", "img[alt]"]:
+                texto = _primeiro_texto(card.locator(sel))
+                if texto:
+                    nome = texto.strip()
+                    break
+            if not nome:
+                alt = _primeiro_texto(card.locator("img[alt]"))
+                if alt:
+                    nome = alt.strip()
+
+            link = ""
+            for s in ["a[href*='shopee.com.br/product/']", "a"]:
+                href = _primeiro_href(card.locator(s))
+                if href:
+                    link = href if href.startswith("http") else f"https://shopee.com.br{href}"
+                    break
+
+            preco_texto = ""
+            for sel in ["[class*='price']", "span[class*='currency']", "[data-sqe='price']"]:
+                texto = _primeiro_texto(card.locator(sel))
+                if texto:
+                    preco_texto = texto
+                    break
+            if not preco_texto:
+                page_content = card.inner_text()
+                match = re.search(r"R\$\s*[\d\.,]+", page_content)
+                if match:
+                    preco_texto = match.group(0)
+
+            preco_produto = normalizar_preco(preco_texto)
+            if not nome or not link or preco_produto is None:
+                continue
+
+            resultados.append({
+                "produto": nome[:120],
+                "link": link,
+                "preco_produto": preco_produto,
+                "loja": "Shopee",
+            })
         except Exception:
             continue
 
@@ -140,38 +492,41 @@ def buscar_top3_amazon(page, nome_produto: str):
 
     page.wait_for_timeout(1500)
     cards = page.locator("div.s-result-item[data-component-type='s-search-result']")
+    if cards.count() == 0:
+        cards = page.locator("div[data-component-type='s-search-result']")
+    if cards.count() == 0:
+        cards = page.locator("div.s-card-container")
     resultados = []
     limite = min(cards.count(), 6)
 
     for idx in range(limite):
         card = cards.nth(idx)
         try:
-            titulo_loc = card.locator("h2 a span")
-            link_loc = card.locator("h2 a")
-            if titulo_loc.count() == 0 or link_loc.count() == 0:
+            titulo = ""
+            for s in ["h2 a span", "h2 span", "[data-cy='title-recipe']", "h2"]:
+                texto = _primeiro_texto(card.locator(s))
+                if texto:
+                    titulo = texto
+                    break
+
+            link = ""
+            for s in ["h2 a", "a.a-link-normal", "a[href*='/dp/']", "a[href*='/gp/product/']"]:
+                href = _primeiro_href(card.locator(s))
+                if href:
+                    link = href
+                    break
+
+            if not titulo or not link:
                 continue
 
-            nome = titulo_loc.first.inner_text().strip()
-            href = link_loc.first.get_attribute("href")
-            if not nome or not href:
-                continue
-
-            preco_whole = card.locator("span.a-price-whole")
-            preco_frac = card.locator("span.a-price-fraction")
-            preco_texto = ""
-            if preco_whole.count() > 0:
-                preco_texto = preco_whole.first.inner_text().strip()
-                if preco_frac.count() > 0:
-                    preco_texto = f"{preco_texto},{preco_frac.first.inner_text().strip()}"
-
-            preco_produto = normalizar_preco(preco_texto)
+            preco_produto = extrair_preco_amazon_card(card)
             if preco_produto is None:
                 continue
 
-            link = href if href.startswith("http") else f"https://www.amazon.com.br{href}"
+            link = link if link.startswith("http") else f"https://www.amazon.com.br{link}"
             resultados.append(
                 {
-                    "produto": nome,
+                    "produto": titulo,
                     "link": link,
                     "preco_produto": preco_produto,
                     "loja": "Amazon",
@@ -341,19 +696,51 @@ def extrair_valor_frete_amazon(page) -> float:
     raise ValueError("Nao foi possivel extrair o valor do frete na Amazon")
 
 
-def calcular_melhor_oferta(nome_produto: str, cep_destino: str) -> Oferta:
-    """Busca em multiplos marketplaces e retorna a melhor pelo menor preco total."""
+def calcular_ofertas(nome_produto: str, cep_destino: str) -> List[Oferta]:
+    """Busca em multiplos marketplaces e retorna ofertas ordenadas por menor preco total."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(locale="pt-BR")
         page = context.new_page()
 
         try:
-            resultados_ml = buscar_top3_mercado_livre(page, nome_produto)
-            resultados_amz = buscar_top3_amazon(page, nome_produto)
-            resultados = resultados_ml + resultados_amz
+            resultados = []
+            resultados.extend(buscar_top3_mercado_livre(page, nome_produto))
+            resultados.extend(buscar_top3_amazon(page, nome_produto))
+            resultados.extend(buscar_top3_shein(page, nome_produto))
+            resultados.extend(buscar_top3_shopee(page, nome_produto))
+
+            # Fallback de descoberta via SearXNG quando marketplaces nao produzem cards uteis.
             if not resultados:
-                raise ValueError("Produto nao encontrado em Mercado Livre/Amazon")
+                urls_fallback = buscar_urls_searxng(nome_produto, limite=8)
+                for item_fb in urls_fallback:
+                    url = item_fb["url"]
+                    dom = url.lower()
+                    if "mercadolivre" in dom:
+                        loja = "Mercado Livre"
+                    elif "amazon" in dom:
+                        loja = "Amazon"
+                    elif "shein" in dom:
+                        loja = "Shein"
+                    elif "shopee" in dom:
+                        loja = "Shopee"
+                    elif "kabum" in dom:
+                        loja = "Kabum"
+                    elif "pichau" in dom:
+                        loja = "Pichau"
+                    elif "terabyte" in dom:
+                        loja = "Terabyte"
+                    else:
+                        loja = "Busca Web"
+                    resultados.append({
+                        "produto": item_fb.get("titulo") or nome_produto,
+                        "link": url,
+                        "preco_produto": item_fb["preco"] if item_fb["preco"] is not None else 0.0,
+                        "loja": loja,
+                    })
+
+            if not resultados:
+                raise ValueError("Produto nao encontrado nos marketplaces")
 
             ofertas_validas: List[Oferta] = []
             erros_frete = []
@@ -368,9 +755,24 @@ def calcular_melhor_oferta(nome_produto: str, cep_destino: str) -> Oferta:
                     if loja == "Amazon":
                         inserir_cep_calcular_frete_amazon(page_prod, cep_destino)
                         valor_frete = extrair_valor_frete_amazon(page_prod)
-                    else:
+                    elif loja == "Mercado Livre":
                         inserir_cep_calcular_frete(page_prod, cep_destino)
                         valor_frete = extrair_valor_frete(page_prod)
+                    else:
+                        texto_pagina = page_prod.locator("body").inner_text(timeout=3000)
+                        preco_texto = None
+                        for padrao in [
+                            r"R\$\s*[\d\.]+,\d{2}",
+                            r"\$\s*[\d\.,]+",
+                        ]:
+                            m = re.search(padrao, texto_pagina)
+                            if m:
+                                preco_texto = m.group(0)
+                                break
+                        preco_encontrado = normalizar_preco(preco_texto) if preco_texto else None
+                        valor_frete = 0.0
+                        if preco_encontrado is not None and resultado.get("preco_produto", 0.0) <= 0:
+                            resultado["preco_produto"] = preco_encontrado
 
                     preco_total = resultado["preco_produto"] + valor_frete
 
@@ -396,10 +798,43 @@ def calcular_melhor_oferta(nome_produto: str, cep_destino: str) -> Oferta:
                 )
 
             ofertas_validas.sort(key=lambda x: x.preco_total)
-            return ofertas_validas[0]
+            return ofertas_validas
         finally:
             context.close()
             browser.close()
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "scrapper-geral"}
+
+
+@app.post("/buscar_geral")
+def buscar_geral(payload: BuscaGeralRequest):
+    termo = payload.termo.strip()
+    cep = (payload.cep or DEFAULT_CEP).strip()
+
+    try:
+        ofertas = calcular_ofertas(termo, cep)
+        formatado = ofertas_para_payload(ofertas, MAX_GERAL_RESULTS)
+        return {
+            "fonte": "marketplaces_geral",
+            "termo": termo,
+            "cep": cep,
+            "total_encontrados": len(formatado["resultados"]),
+            "fallback_usado": False,
+            **formatado,
+        }
+    except Exception as exc:
+        return {
+            "fonte": "marketplaces_geral",
+            "termo": termo,
+            "cep": cep,
+            "total_encontrados": 0,
+            "fallback_usado": False,
+            "resultados": [],
+            "erro": str(exc),
+        }
 
 
 def main():
@@ -410,7 +845,7 @@ def main():
         nome_produto = sys.argv[1].strip()
         cep_destino = sys.argv[2].strip()
 
-        melhor = calcular_melhor_oferta(nome_produto, cep_destino)
+        melhor = calcular_ofertas(nome_produto, cep_destino)[0]
         saida = {
             "produto": melhor.produto,
             "loja": melhor.loja,
